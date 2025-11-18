@@ -1,0 +1,42 @@
+{
+  "strategy_name": "ICTStrategy",
+  "instrument_id": "BTCUSDT-PERP.BYBIT",
+  "htf_bar_type": "BTCUSDT-PERP.BYBIT-1-HOUR-LAST-EXTERNAL",
+  "ltf_bar_type": "BTCUSDT-PERP.BYBIT-5-MINUTE-LAST-EXTERNAL",
+
+  "risk_management": {
+    "risk_per_trade_pct": 1.0,
+    "min_rr_ratio": 2.0,
+    "leverage": 5,
+    "max_position_size_pct": 10.0
+  },
+
+  "order_block_params": {
+    "min_impulse_bars": 3,
+    "min_impulse_size": 0.5,
+    "lookback_period": 50
+  },
+
+  "fvg_params": {
+    "min_gap_size": 0.1,
+    "fill_threshold": 0.5,
+    "lookback_period": 100
+  },
+
+  "liquidity_params": {
+    "swing_lookback": 5,
+    "equal_threshold": 0.1
+  },
+
+  "market_structure_params": {
+    "swing_lookback": 5,
+    "structure_lookback": 20
+  },
+
+  "session_config": {
+    "london_open": "08:00",
+    "new_york_open": "13:00",
+    "asian_open": "00:00",
+    "use_killzone_filter": true
+  }
+}
