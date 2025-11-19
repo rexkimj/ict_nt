@@ -1,31 +1,34 @@
 """
-ICT Strategy Backtesting Script (Simplified)
+ICT Strategy Backtesting Script (완전 자동화 버전)
 
-NautilusTrader를 사용한 백테스팅
+데이터 다운로드부터 백테스트까지 원클릭으로 실행
 
 사용법:
     python backtest.py
-
-참고:
-    - 이 버전은 간소화된 백테스트 예제입니다
-    - 실제 히스토리컬 데이터가 필요합니다
-    - NautilusTrader 1.190.0 이상 필요
 """
 import json
 from pathlib import Path
 from datetime import datetime
 from decimal import Decimal
+import time
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.model.currencies import USDT
-from nautilus_trader.model.enums import AccountType, OmsType
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.objects import Money
-from nautilus_trader.persistence.wranglers import BarDataWrangler
-from nautilus_trader.test_kit.providers import TestInstrumentProvider
+from nautilus_trader.model.enums import AccountType, OmsType, AssetClass, BarAggregation
+from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
+from nautilus_trader.model.objects import Money, Price, Quantity
+from nautilus_trader.model.instruments import CryptoFuture
+from nautilus_trader.model.data import BarType, Bar, BarSpecification
+from nautilus_trader.core.datetime import unix_nanos_to_dt
 
 import numpy as np
 import pandas as pd
+
+try:
+    import ccxt
+    CCXT_AVAILABLE = True
+except ImportError:
+    CCXT_AVAILABLE = False
 
 from strategies.ict_strategy import ICTStrategy
 
@@ -36,69 +39,243 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def create_sample_data():
+def download_bybit_data(
+    symbol: str = 'BTC/USDT:USDT',
+    timeframe: str = '1h',
+    start_date: str = '2024-01-01',
+    days: int = 90
+):
     """
-    샘플 데이터 생성 (데모용)
+    Bybit에서 데이터 다운로드
 
-    실제 사용 시에는:
-    1. Bybit에서 히스토리컬 데이터 다운로드
-    2. CSV 파일로 저장
-    3. BarDataWrangler로 로드
+    Parameters
+    ----------
+    symbol : str
+        거래 심볼
+    timeframe : str
+        타임프레임
+    start_date : str
+        시작 날짜
+    days : int
+        다운로드할 일수
+
+    Returns
+    -------
+    pd.DataFrame
+        OHLCV 데이터
     """
-    print("\n⚠️  샘플 데이터 생성 중...")
-    print("실제 백테스트를 위해서는 히스토리컬 데이터가 필요합니다.")
+    if not CCXT_AVAILABLE:
+        print("⚠️  ccxt가 설치되지 않았습니다.")
+        print("설치: pip install ccxt")
+        return create_sample_data(days * 24 if timeframe == '1h' else days * 288)
 
-    # 샘플 OHLCV 데이터 생성 (랜덤 워크)
-    n_bars = 1000
+    print(f"\n📥 Bybit에서 {symbol} {timeframe} 데이터 다운로드 중...")
+
+    exchange = ccxt.bybit({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'linear'}
+    })
+
+    start_ts = exchange.parse8601(f"{start_date}T00:00:00Z")
+    all_ohlcv = []
+
+    timeframe_ms = {
+        '1m': 60 * 1000,
+        '5m': 5 * 60 * 1000,
+        '1h': 60 * 60 * 1000,
+    }
+
+    target_bars = days * 24 if timeframe == '1h' else days * 288
+    current_ts = start_ts
+
+    try:
+        while len(all_ohlcv) < target_bars:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts, limit=1000)
+
+            if not ohlcv:
+                break
+
+            all_ohlcv.extend(ohlcv)
+            last_ts = ohlcv[-1][0]
+            current_ts = last_ts + timeframe_ms.get(timeframe, 60 * 60 * 1000)
+
+            print(f"  {len(all_ohlcv)} 캔들 다운로드됨...", end='\r')
+            time.sleep(0.1)
+
+            if len(all_ohlcv) >= target_bars:
+                break
+
+        print(f"\n✅ {len(all_ohlcv)} 캔들 다운로드 완료!")
+
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+
+        return df
+
+    except Exception as e:
+        print(f"⚠️  다운로드 실패: {e}")
+        print("샘플 데이터로 대체합니다...")
+        return create_sample_data(target_bars)
+
+
+def create_sample_data(n_bars: int = 2000):
+    """
+    샘플 데이터 생성 (랜덤 워크)
+
+    Parameters
+    ----------
+    n_bars : int
+        생성할 캔들 수
+
+    Returns
+    -------
+    pd.DataFrame
+        샘플 OHLCV 데이터
+    """
+    print(f"\n📊 샘플 데이터 생성 중 ({n_bars} 캔들)...")
+
     start_price = 50000.0
-
     dates = pd.date_range(start='2024-01-01', periods=n_bars, freq='1H')
 
     prices = [start_price]
     for _ in range(n_bars - 1):
-        change = np.random.randn() * 100  # 랜덤 변화
-        prices.append(prices[-1] + change)
+        change = np.random.randn() * 200  # 랜덤 변화
+        new_price = max(prices[-1] + change, 10000)  # 최소 가격 보장
+        prices.append(new_price)
 
     data = {
         'timestamp': dates,
         'open': prices,
-        'high': [p * (1 + abs(np.random.randn()) * 0.001) for p in prices],
-        'low': [p * (1 - abs(np.random.randn()) * 0.001) for p in prices],
-        'close': [p + np.random.randn() * 50 for p in prices],
+        'high': [p * (1 + abs(np.random.randn()) * 0.01) for p in prices],
+        'low': [p * (1 - abs(np.random.randn()) * 0.01) for p in prices],
+        'close': [p + np.random.randn() * 100 for p in prices],
         'volume': [np.random.randint(100, 1000) for _ in range(n_bars)],
     }
 
     df = pd.DataFrame(data)
+    print("✅ 샘플 데이터 생성 완료!")
     return df
 
 
-def run_backtest_simple():
-    """간소화된 백테스트 실행"""
+def create_bybit_instrument():
+    """BYBIT용 BTC/USDT 선물 인스트루먼트 생성"""
+    return CryptoFuture(
+        instrument_id=InstrumentId(
+            symbol=Symbol("BTCUSDT-PERP"),
+            venue=Venue("BYBIT")
+        ),
+        raw_symbol=Symbol("BTCUSDT"),
+        underlying=USDT,
+        quote_currency=USDT,
+        settlement_currency=USDT,
+        is_inverse=False,
+        price_precision=1,
+        size_precision=3,
+        price_increment=Price.from_str("0.1"),
+        size_increment=Quantity.from_str("0.001"),
+        max_quantity=Quantity.from_str("1000.0"),
+        min_quantity=Quantity.from_str("0.001"),
+        max_price=Price.from_str("1000000.0"),
+        min_price=Price.from_str("0.1"),
+        margin_init=Decimal("0.01"),
+        margin_maint=Decimal("0.005"),
+        maker_fee=Decimal("0.0002"),
+        taker_fee=Decimal("0.0006"),
+        ts_event=0,
+        ts_init=0,
+    )
+
+
+def df_to_bars(df: pd.DataFrame, instrument_id: InstrumentId, bar_type: BarType) -> list:
+    """
+    DataFrame을 NautilusTrader Bar 객체 리스트로 변환
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        OHLCV 데이터
+    instrument_id : InstrumentId
+        인스트루먼트 ID
+    bar_type : BarType
+        바 타입
+
+    Returns
+    -------
+    list[Bar]
+        Bar 객체 리스트
+    """
+    bars = []
+
+    for _, row in df.iterrows():
+        ts_event = int(row['timestamp'].timestamp() * 1_000_000_000)  # 나노초
+        ts_init = ts_event
+
+        bar = Bar(
+            bar_type=bar_type,
+            open=Price.from_str(f"{row['open']:.1f}"),
+            high=Price.from_str(f"{row['high']:.1f}"),
+            low=Price.from_str(f"{row['low']:.1f}"),
+            close=Price.from_str(f"{row['close']:.1f}"),
+            volume=Quantity.from_str(f"{row['volume']:.3f}"),
+            ts_event=ts_event,
+            ts_init=ts_init,
+        )
+        bars.append(bar)
+
+    return bars
+
+
+def run_backtest():
+    """백테스트 실행"""
     print("=" * 80)
-    print("ICT Trading Strategy Backtest (Simplified)")
+    print("ICT Trading Strategy Backtest")
     print("=" * 80)
 
     # 설정 로드
     try:
         strategy_config = load_config('config/strategy_config.json')
     except FileNotFoundError:
-        print("Error: config/strategy_config.json not found")
+        print("❌ config/strategy_config.json을 찾을 수 없습니다.")
         return
 
-    print(f"\nInstrument: {strategy_config['instrument_id']}")
-    print(f"Risk per Trade: {strategy_config['risk_management']['risk_per_trade_pct']}%")
-    print(f"Min RR Ratio: {strategy_config['risk_management']['min_rr_ratio']}:1")
-    print(f"Leverage: {strategy_config['risk_management']['leverage']}x")
+    print(f"\n⚙️  전략 설정:")
+    print(f"  Risk per Trade: {strategy_config['risk_management']['risk_per_trade_pct']}%")
+    print(f"  Min RR Ratio: {strategy_config['risk_management']['min_rr_ratio']}:1")
+    print(f"  Leverage: {strategy_config['risk_management']['leverage']}x")
 
+    # 데이터 다운로드
     print("\n" + "=" * 80)
-    print("백테스트 엔진 초기화 중...")
+    print("1단계: 히스토리컬 데이터 준비")
     print("=" * 80)
 
-    # 백테스트 엔진 생성
-    config = BacktestEngineConfig(
-        trader_id="BACKTESTER-001",
+    # 1시간봉 데이터 (HTF)
+    htf_df = download_bybit_data(
+        symbol='BTC/USDT:USDT',
+        timeframe='1h',
+        start_date='2024-01-01',
+        days=90
     )
 
+    # 5분봉 데이터 (LTF)
+    ltf_df = download_bybit_data(
+        symbol='BTC/USDT:USDT',
+        timeframe='5m',
+        start_date='2024-01-01',
+        days=90
+    )
+
+    print(f"\nHTF (1시간봉): {len(htf_df)} 캔들")
+    print(f"  기간: {htf_df['timestamp'].min()} ~ {htf_df['timestamp'].max()}")
+    print(f"LTF (5분봉): {len(ltf_df)} 캔들")
+    print(f"  기간: {ltf_df['timestamp'].min()} ~ {ltf_df['timestamp'].max()}")
+
+    # 백테스트 엔진 초기화
+    print("\n" + "=" * 80)
+    print("2단계: 백테스트 엔진 초기화")
+    print("=" * 80)
+
+    config = BacktestEngineConfig(trader_id="BACKTESTER-001")
     engine = BacktestEngine(config=config)
 
     # Venue 추가
@@ -111,81 +288,148 @@ def run_backtest_simple():
         starting_balances=[Money(10000, USDT)],
     )
 
-    # 테스트 인스트루먼트 생성
-    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    # 인스트루먼트 생성 및 추가
+    instrument = create_bybit_instrument()
     engine.add_instrument(instrument)
 
-    print("\n⚠️  주의: 이 버전은 데모용 간소화 버전입니다.")
-    print("실제 백테스트를 위해서는 다음이 필요합니다:")
-    print("  1. Bybit에서 히스토리컬 데이터 다운로드")
-    print("  2. NautilusTrader 데이터 카탈로그 설정")
-    print("  3. 실제 바 데이터를 엔진에 추가")
-    print("\n자세한 내용은 NautilusTrader 문서를 참고하세요:")
-    print("  https://nautilustrader.io/docs/guides/backtesting")
+    print(f"✅ Venue 추가: {venue}")
+    print(f"✅ 인스트루먼트 추가: {instrument.id}")
+    print(f"✅ 초기 잔고: $10,000 USDT")
 
+    # 바 데이터 생성 및 추가
     print("\n" + "=" * 80)
-    print("백테스트 완료")
+    print("3단계: 바 데이터 추가")
     print("=" * 80)
 
+    # HTF 바 타입
+    htf_bar_type = BarType(
+        instrument_id=instrument.id,
+        bar_spec=BarSpecification(
+            step=1,
+            aggregation=BarAggregation.HOUR,
+            price_type=4,  # LAST
+        ),
+        aggregation_source=2,  # EXTERNAL
+    )
 
-def show_data_download_guide():
-    """데이터 다운로드 가이드 출력"""
+    # LTF 바 타입
+    ltf_bar_type = BarType(
+        instrument_id=instrument.id,
+        bar_spec=BarSpecification(
+            step=5,
+            aggregation=BarAggregation.MINUTE,
+            price_type=4,  # LAST
+        ),
+        aggregation_source=2,  # EXTERNAL
+    )
+
+    # DataFrame을 Bar 객체로 변환
+    htf_bars = df_to_bars(htf_df, instrument.id, htf_bar_type)
+    ltf_bars = df_to_bars(ltf_df, instrument.id, ltf_bar_type)
+
+    # 엔진에 추가
+    engine.add_data(htf_bars)
+    engine.add_data(ltf_bars)
+
+    print(f"✅ HTF 바 추가: {len(htf_bars)} 개")
+    print(f"✅ LTF 바 추가: {len(ltf_bars)} 개")
+
+    # 전략 추가
     print("\n" + "=" * 80)
-    print("히스토리컬 데이터 다운로드 가이드")
+    print("4단계: 전략 추가")
     print("=" * 80)
 
-    print("""
-1. Bybit API를 사용한 데이터 다운로드:
+    strategy_cfg = {
+        'instrument_id': str(instrument.id),
+        'htf_bar_type': str(htf_bar_type),
+        'ltf_bar_type': str(ltf_bar_type),
+        'risk_per_trade_pct': strategy_config['risk_management']['risk_per_trade_pct'],
+        'min_rr_ratio': strategy_config['risk_management']['min_rr_ratio'],
+        'leverage': strategy_config['risk_management']['leverage'],
+        'order_block_params': strategy_config['order_block_params'],
+        'fvg_params': strategy_config['fvg_params'],
+        'liquidity_params': strategy_config['liquidity_params'],
+        'market_structure_params': strategy_config['market_structure_params'],
+    }
 
-```python
-import ccxt
-import pandas as pd
+    engine.add_strategy(ICTStrategy(config=strategy_cfg))
+    print("✅ ICT 전략 추가 완료")
 
-exchange = ccxt.bybit({
-    'enableRateLimit': True,
-})
+    # 백테스트 실행
+    print("\n" + "=" * 80)
+    print("5단계: 백테스트 실행")
+    print("=" * 80)
+    print("실행 중...\n")
 
-# OHLCV 데이터 다운로드
-symbol = 'BTC/USDT:USDT'
-timeframe = '1h'
-since = exchange.parse8601('2024-01-01T00:00:00Z')
+    engine.run()
 
-ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since)
-df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-df.to_csv('btcusdt_1h.csv', index=False)
-```
+    print("\n" + "=" * 80)
+    print("6단계: 결과 분석")
+    print("=" * 80)
 
-2. CSV 파일을 NautilusTrader 형식으로 변환:
+    # 계좌 통계
+    account = engine.trader.generate_account_report(venue)
+    print(f"\n💰 계좌 결과:")
+    print(f"  시작 잔고: $10,000.00")
 
-```python
-from nautilus_trader.persistence.wranglers import BarDataWrangler
-from nautilus_trader.model.data import BarType
+    final_balance = 10000.0  # 기본값
+    try:
+        # 최종 잔고 가져오기
+        portfolio_account = list(engine.trader.portfolio.accounts())[0]
+        final_balance = portfolio_account.balance_total().as_double()
+        pnl = final_balance - 10000.0
+        return_pct = (pnl / 10000.0) * 100
 
-# CSV 로드
-df = pd.read_csv('btcusdt_1h.csv')
+        print(f"  최종 잔고: ${final_balance:.2f}")
+        print(f"  총 PnL: ${pnl:+.2f}")
+        print(f"  수익률: {return_pct:+.2f}%")
+    except Exception as e:
+        print(f"  (잔고 정보를 가져올 수 없습니다)")
 
-# Wrangler로 변환
-wrangler = BarDataWrangler(
-    bar_type=BarType.from_str('BTCUSDT-PERP.BYBIT-1-HOUR-LAST-EXTERNAL'),
-    instrument=instrument,
-)
+    # 거래 통계
+    print(f"\n📊 거래 통계:")
 
-bars = wrangler.process(df)
+    try:
+        positions = engine.trader.generate_positions_report()
+        fills = engine.trader.generate_order_fills_report()
 
-# 엔진에 추가
-engine.add_bars(bars)
-```
+        print(f"  총 주문 체결: {len(fills)} 건")
+        print(f"  총 포지션: {len(positions)} 개")
 
-3. 또는 NautilusTrader 데이터 카탈로그 사용:
+        if positions:
+            winning = [p for p in positions if p.realized_pnl.as_double() > 0]
+            losing = [p for p in positions if p.realized_pnl.as_double() < 0]
 
-```python
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+            print(f"  승리 거래: {len(winning)} 건")
+            print(f"  패배 거래: {len(losing)} 건")
 
-catalog = ParquetDataCatalog('./catalog')
-# 데이터를 카탈로그에 저장하고 백테스트에 사용
-```
-""")
+            if positions:
+                win_rate = (len(winning) / len(positions)) * 100
+                print(f"  승률: {win_rate:.1f}%")
+
+            if winning:
+                avg_win = sum(p.realized_pnl.as_double() for p in winning) / len(winning)
+                print(f"  평균 수익: ${avg_win:.2f}")
+
+            if losing:
+                avg_loss = sum(p.realized_pnl.as_double() for p in losing) / len(losing)
+                print(f"  평균 손실: ${avg_loss:.2f}")
+
+            total_wins = sum(p.realized_pnl.as_double() for p in winning)
+            total_losses = abs(sum(p.realized_pnl.as_double() for p in losing))
+
+            if total_losses > 0:
+                profit_factor = total_wins / total_losses
+                print(f"  Profit Factor: {profit_factor:.2f}")
+        else:
+            print("  (거래 없음)")
+
+    except Exception as e:
+        print(f"  (통계 생성 실패: {e})")
+
+    print("\n" + "=" * 80)
+    print("백테스트 완료!")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
@@ -201,18 +445,16 @@ if __name__ == "__main__":
     """)
 
     try:
-        run_backtest_simple()
-        show_data_download_guide()
+        run_backtest()
+
+        print("\n💡 팁:")
+        print("  - ccxt 설치하면 실제 Bybit 데이터 사용: pip install ccxt")
+        print("  - 전략 파라미터 조정: config/strategy_config.json")
+        print("  - 라이브 트레이딩: python live_trade.py")
+
+    except KeyboardInterrupt:
+        print("\n\n중단됨")
     except Exception as e:
-        print(f"\nError during backtest: {e}")
+        print(f"\n❌ 오류 발생: {e}")
         import traceback
         traceback.print_exc()
-
-        print("\n" + "=" * 80)
-        print("오류 해결 방법:")
-        print("=" * 80)
-        print("1. NautilusTrader가 올바르게 설치되었는지 확인:")
-        print("   pip install nautilus_trader>=1.190.0")
-        print("\n2. 설정 파일이 존재하는지 확인:")
-        print("   config/strategy_config.json")
-        print("\n3. 데이터 다운로드 가이드를 참고하여 히스토리컬 데이터 준비")
