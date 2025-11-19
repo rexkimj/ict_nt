@@ -195,11 +195,38 @@ ict_nt/
 
 ## 백테스팅
 
-### 백테스트 실행
+### 1. 히스토리컬 데이터 다운로드
+
+백테스트를 위해 먼저 Bybit에서 히스토리컬 데이터를 다운로드합니다:
+
+```bash
+# 단일 타임프레임 다운로드
+python download_data.py --symbol BTC/USDT:USDT --timeframe 1h --start-date 2024-01-01
+
+# 다중 타임프레임 다운로드 (5분 + 1시간)
+python download_data.py --symbol BTC/USDT:USDT --multi --start-date 2024-01-01
+
+# 옵션
+# --symbol: 거래 심볼 (기본: BTC/USDT:USDT)
+# --timeframe: 타임프레임 (1m, 5m, 1h, 4h, 1d)
+# --start-date: 시작 날짜 (YYYY-MM-DD)
+# --end-date: 종료 날짜 (기본: today)
+# --multi: 5분 + 1시간 동시 다운로드
+```
+
+데이터는 `data/` 폴더에 CSV 파일로 저장됩니다.
+
+### 2. 백테스트 실행
 
 ```bash
 python backtest.py
 ```
+
+**참고**: 현재 백테스트 스크립트는 간소화된 데모 버전입니다. 실제 백테스팅을 위해서는:
+
+1. 다운로드한 CSV 데이터를 NautilusTrader 형식으로 변환
+2. 백테스트 엔진에 데이터 추가
+3. 자세한 내용은 `backtest.py`의 가이드 참고
 
 ### 백테스트 결과
 
@@ -211,9 +238,27 @@ python backtest.py
 - Profit Factor
 - 최대 Drawdown
 
-### 백테스트 데이터
+### NautilusTrader 데이터 형식 변환 예제
 
-백테스트를 위해서는 historical data가 필요합니다. NautilusTrader의 데이터 카탈로그를 사용하거나 Bybit에서 데이터를 다운로드할 수 있습니다.
+```python
+from nautilus_trader.persistence.wranglers import BarDataWrangler
+from nautilus_trader.model.data import BarType
+import pandas as pd
+
+# CSV 로드
+df = pd.read_csv('data/BTCUSDTUSDT_1h.csv')
+
+# NautilusTrader 형식으로 변환
+wrangler = BarDataWrangler(
+    bar_type=BarType.from_str('BTCUSDT-PERP.BYBIT-1-HOUR-LAST-EXTERNAL'),
+    instrument=instrument,
+)
+
+bars = wrangler.process(df)
+
+# 백테스트 엔진에 추가
+engine.add_bars(bars)
+```
 
 ## 라이브 트레이딩
 
