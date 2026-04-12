@@ -1,0 +1,11 @@
+{
+  "exchange": "BYBIT",
+  "account_type": "futures",
+  "testnet": true,
+  "api_key": "YOUR_BYBIT_API_KEY",
+  "api_secret": "YOUR_BYBIT_API_SECRET",
+  "base_url_http": "https://api-testnet.bybit.com",
+  "base_url_ws": "wss://stream-testnet.bybit.com/v5/public/linear",
+  "timeout": 30,
+  "recv_window": 5000
+}
