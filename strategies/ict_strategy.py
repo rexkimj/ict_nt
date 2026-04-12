@@ -72,7 +72,11 @@ class ICTStrategy(Strategy):
                 'market_structure_params': Market Structure 파라미터,
             }
         """
-        super().__init__(config)
+        # StrategyConfig 생성
+        from nautilus_trader.config import StrategyConfig
+
+        strategy_config = StrategyConfig()
+        super().__init__(strategy_config)
 
         # 기본 설정
         self.instrument_id = InstrumentId.from_str(config['instrument_id'])
@@ -132,9 +136,6 @@ class ICTStrategy(Strategy):
         # 데이터 구독
         self.subscribe_bars(self.htf_bar_type)
         self.subscribe_bars(self.ltf_bar_type)
-
-        # 포지션 업데이트 구독
-        self.subscribe_position_updates()
 
     def on_stop(self):
         """전략 종료 시 호출"""

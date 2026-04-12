@@ -136,21 +136,50 @@ def create_sample_data(n_bars: int = 2000):
     print(f"\n📊 샘플 데이터 생성 중 ({n_bars} 캔들)...")
 
     start_price = 50000.0
-    dates = pd.date_range(start='2024-01-01', periods=n_bars, freq='1H')
+    dates = pd.date_range(start='2024-01-01', periods=n_bars, freq='h')
 
-    prices = [start_price]
-    for _ in range(n_bars - 1):
-        change = np.random.randn() * 200  # 랜덤 변화
-        new_price = max(prices[-1] + change, 10000)  # 최소 가격 보장
-        prices.append(new_price)
+    # OHLC 데이터 생성
+    opens = []
+    highs = []
+    lows = []
+    closes = []
+    volumes = []
+
+    current_price = start_price
+
+    for _ in range(n_bars):
+        # Open
+        open_price = current_price
+
+        # Close (랜덤 워크)
+        change = np.random.randn() * 200
+        close_price = max(open_price + change, 10000)
+
+        # High: open과 close 중 큰 값 + 약간의 위크
+        max_oc = max(open_price, close_price)
+        high_wick = abs(np.random.randn()) * max_oc * 0.005  # 0.5%
+        high_price = max_oc + high_wick
+
+        # Low: open과 close 중 작은 값 - 약간의 위크
+        min_oc = min(open_price, close_price)
+        low_wick = abs(np.random.randn()) * min_oc * 0.005  # 0.5%
+        low_price = max(min_oc - low_wick, 1000)  # 최소가 보장
+
+        opens.append(open_price)
+        highs.append(high_price)
+        lows.append(low_price)
+        closes.append(close_price)
+        volumes.append(np.random.randint(100, 1000))
+
+        current_price = close_price
 
     data = {
         'timestamp': dates,
-        'open': prices,
-        'high': [p * (1 + abs(np.random.randn()) * 0.01) for p in prices],
-        'low': [p * (1 - abs(np.random.randn()) * 0.01) for p in prices],
-        'close': [p + np.random.randn() * 100 for p in prices],
-        'volume': [np.random.randint(100, 1000) for _ in range(n_bars)],
+        'open': opens,
+        'high': highs,
+        'low': lows,
+        'close': closes,
+        'volume': volumes,
     }
 
     df = pd.DataFrame(data)
@@ -158,33 +187,13 @@ def create_sample_data(n_bars: int = 2000):
     return df
 
 
-def create_bybit_instrument():
-    """BYBIT용 BTC/USDT 선물 인스트루먼트 생성"""
-    return CryptoFuture(
-        instrument_id=InstrumentId(
-            symbol=Symbol("BTCUSDT-PERP"),
-            venue=Venue("BYBIT")
-        ),
-        raw_symbol=Symbol("BTCUSDT"),
-        underlying=USDT,
-        quote_currency=USDT,
-        settlement_currency=USDT,
-        is_inverse=False,
-        price_precision=1,
-        size_precision=3,
-        price_increment=Price.from_str("0.1"),
-        size_increment=Quantity.from_str("0.001"),
-        max_quantity=Quantity.from_str("1000.0"),
-        min_quantity=Quantity.from_str("0.001"),
-        max_price=Price.from_str("1000000.0"),
-        min_price=Price.from_str("0.1"),
-        margin_init=Decimal("0.01"),
-        margin_maint=Decimal("0.005"),
-        maker_fee=Decimal("0.0002"),
-        taker_fee=Decimal("0.0006"),
-        ts_event=0,
-        ts_init=0,
-    )
+def create_test_instrument():
+    """테스트용 BTC/USDT 선물 인스트루먼트 생성"""
+    from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
+    # TestInstrumentProvider의 기본 인스트루먼트 사용
+    # venue는 BINANCE이지만 테스트 목적으로는 충분함
+    return TestInstrumentProvider.btcusdt_perp_binance()
 
 
 def df_to_bars(df: pd.DataFrame, instrument_id: InstrumentId, bar_type: BarType) -> list:
@@ -278,8 +287,8 @@ def run_backtest():
     config = BacktestEngineConfig(trader_id="BACKTESTER-001")
     engine = BacktestEngine(config=config)
 
-    # Venue 추가
-    venue = Venue("BYBIT")
+    # Venue 추가 (테스트용 BINANCE venue 사용)
+    venue = Venue("BINANCE")
     engine.add_venue(
         venue=venue,
         oms_type=OmsType.NETTING,
@@ -289,7 +298,7 @@ def run_backtest():
     )
 
     # 인스트루먼트 생성 및 추가
-    instrument = create_bybit_instrument()
+    instrument = create_test_instrument()
     engine.add_instrument(instrument)
 
     print(f"✅ Venue 추가: {venue}")
@@ -309,7 +318,7 @@ def run_backtest():
             aggregation=BarAggregation.HOUR,
             price_type=4,  # LAST
         ),
-        aggregation_source=2,  # EXTERNAL
+        aggregation_source=1,  # INTERNAL (백테스트용)
     )
 
     # LTF 바 타입
@@ -320,7 +329,7 @@ def run_backtest():
             aggregation=BarAggregation.MINUTE,
             price_type=4,  # LAST
         ),
-        aggregation_source=2,  # EXTERNAL
+        aggregation_source=1,  # INTERNAL (백테스트용)
     )
 
     # DataFrame을 Bar 객체로 변환
