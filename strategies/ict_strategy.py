@@ -126,8 +126,14 @@ class ICTStrategy(Strategy):
 
         # 상태 추적
         self.htf_trend = MarketTrend.RANGING
+        self.htf_regime_score = 50.0  # 추세 강도 0~100 (50=중립)
         self.liquidity_swept = False
         self.setup_valid = False
+
+        # 포지션 TP/SL 추적
+        self.position_stop_loss: Optional[float] = None
+        self.position_take_profit: Optional[float] = None
+        self.position_is_long: Optional[bool] = None
 
     def on_start(self):
         """전략 시작 시 호출"""
@@ -175,28 +181,37 @@ class ICTStrategy(Strategy):
         if len(self.htf_bars) > self.max_bars:
             self.htf_bars.pop(0)
 
-        if len(self.htf_bars) < 50:
-            return
-
         # numpy 배열로 변환
         highs = np.array([b.high.as_double() for b in self.htf_bars])
         lows = np.array([b.low.as_double() for b in self.htf_bars])
         closes = np.array([b.close.as_double() for b in self.htf_bars])
         opens = np.array([b.open.as_double() for b in self.htf_bars])
 
-        # Market Structure 분석
+        # 5~19개: 가격 기울기로 임시 추세 판단 (fallback)
+        if len(self.htf_bars) < 20:
+            if len(self.htf_bars) >= 5:
+                self.htf_trend = self.market_structure.get_trend_from_price_slope(
+                    closes, period=min(10, len(closes))
+                )
+                self.htf_regime_score = 50.0  # 임시 판단이므로 중립 점수
+                self.log.info(f"HTF Trend (slope): {self.htf_trend.value}")
+            return
+
+        # 20개 이상: 정규 스윙포인트 기반 분석
         swing_points = self.market_structure.detect_swing_points(highs, lows)
         self.htf_trend = self.market_structure.determine_trend(swing_points)
+        self.htf_regime_score = self.market_structure.calculate_trend_score(swing_points)
 
-        self.log.info(f"HTF Trend: {self.htf_trend.value}")
+        self.log.info(f"HTF Trend: {self.htf_trend.value} (score: {self.htf_regime_score:.1f})")
 
-        # BOS/CHoCH 감지
-        structure_breaks = self.market_structure.detect_bos_choch(
-            highs, lows, closes, swing_points
-        )
-        if structure_breaks:
-            latest_break = structure_breaks[-1]
-            self.log.info(f"HTF Structure Break: {latest_break}")
+        # BOS/CHoCH는 데이터 충분할 때만 (50개 이상)
+        if len(self.htf_bars) >= 50:
+            structure_breaks = self.market_structure.detect_bos_choch(
+                highs, lows, closes, swing_points
+            )
+            if structure_breaks:
+                latest_break = structure_breaks[-1]
+                self.log.info(f"HTF Structure Break: {latest_break}")
 
     def _process_ltf_bar(self, bar: Bar):
         """
@@ -214,7 +229,7 @@ class ICTStrategy(Strategy):
         if len(self.ltf_bars) > self.max_bars:
             self.ltf_bars.pop(0)
 
-        if len(self.ltf_bars) < 50:
+        if len(self.ltf_bars) < 20:
             return
 
         # numpy 배열로 변환
@@ -270,9 +285,21 @@ class ICTStrategy(Strategy):
         current_price : float
             현재 가격
         """
-        # 1. HTF 추세 확인
-        if self.htf_trend == MarketTrend.RANGING:
+        # 0. 이미 포지션이 열려 있으면 새 진입 신호 무시
+        if self.portfolio.is_net_long(self.instrument_id) or \
+           self.portfolio.is_net_short(self.instrument_id):
             return
+
+        # 1. HTF 추세 확인 (점수 기반으로 RANGING 유연 처리)
+        if self.htf_trend == MarketTrend.RANGING:
+            if self.htf_regime_score >= 70.0:
+                effective_trend = MarketTrend.BULLISH   # 강한 상승 편향
+            elif self.htf_regime_score <= 30.0:
+                effective_trend = MarketTrend.BEARISH   # 강한 하락 편향
+            else:
+                return  # 진짜 횡보: 진입 보류
+        else:
+            effective_trend = self.htf_trend
 
         # 2. Order Block 감지
         order_blocks = self.order_block_detector.detect(highs, lows, closes, opens)
@@ -306,14 +333,14 @@ class ICTStrategy(Strategy):
             self.market_structure.get_discount_premium_levels()
 
         # === 롱 진입 조건 ===
-        if self.htf_trend == MarketTrend.BULLISH:
+        if effective_trend == MarketTrend.BULLISH:
             self._check_long_entry(
                 current_price, order_blocks, fvgs, swept_levels,
                 discount, equilibrium
             )
 
         # === 숏 진입 조건 ===
-        elif self.htf_trend == MarketTrend.BEARISH:
+        elif effective_trend == MarketTrend.BEARISH:
             self._check_short_entry(
                 current_price, order_blocks, fvgs, swept_levels,
                 premium, equilibrium
@@ -524,7 +551,7 @@ class ICTStrategy(Strategy):
             return
 
         # 포지션 사이즈 계산
-        account_balance = self.portfolio.account(self.venue).balance_total().as_double()
+        account_balance = self.portfolio.account(self.instrument_id.venue).balance_total().as_double()
         position_size, risk_amount = self.risk_manager.calculate_position_size(
             account_balance=account_balance,
             entry_price=entry_price,
@@ -539,8 +566,27 @@ class ICTStrategy(Strategy):
             f"{message}"
         )
 
-        # 주문 제출 (실제 구현 시 주문 생성 로직 추가)
-        # self.submit_order(...)
+        # 주문 제출
+        instrument = self.cache.instrument(self.instrument_id)
+        if instrument is None:
+            self.log.error("Instrument not found in cache")
+            return
+
+        # position_size는 USDT 기준 → BTC 수량으로 변환
+        btc_qty = position_size / entry_price
+        quantity = instrument.make_qty(btc_qty)
+        order = self.order_factory.market(
+            instrument_id=self.instrument_id,
+            order_side=OrderSide.BUY,
+            quantity=quantity,
+            time_in_force=TimeInForce.GTC,
+        )
+        self.submit_order(order)
+
+        # TP/SL 추적 저장
+        self.position_stop_loss = stop_loss
+        self.position_take_profit = take_profit
+        self.position_is_long = True
 
     def _execute_short_entry(
         self,
@@ -567,6 +613,10 @@ class ICTStrategy(Strategy):
             is_long=False,
             buffer_pct=0.1
         )
+
+        # 숏 포지션: SL이 진입가 위에 있어야 함 (보장)
+        if stop_loss <= entry_price:
+            stop_loss = entry_price * 1.015  # 진입가 1.5% 위로 fallback
 
         # Take Profit: 아래쪽 유동성 레벨
         sell_side_liquidity = [
@@ -597,7 +647,7 @@ class ICTStrategy(Strategy):
             return
 
         # 포지션 사이즈 계산
-        account_balance = self.portfolio.account(self.venue).balance_total().as_double()
+        account_balance = self.portfolio.account(self.instrument_id.venue).balance_total().as_double()
         position_size, risk_amount = self.risk_manager.calculate_position_size(
             account_balance=account_balance,
             entry_price=entry_price,
@@ -612,8 +662,27 @@ class ICTStrategy(Strategy):
             f"{message}"
         )
 
-        # 주문 제출 (실제 구현 시 주문 생성 로직 추가)
-        # self.submit_order(...)
+        # 주문 제출
+        instrument = self.cache.instrument(self.instrument_id)
+        if instrument is None:
+            self.log.error("Instrument not found in cache")
+            return
+
+        # position_size는 USDT 기준 → BTC 수량으로 변환
+        btc_qty = position_size / entry_price
+        quantity = instrument.make_qty(btc_qty)
+        order = self.order_factory.market(
+            instrument_id=self.instrument_id,
+            order_side=OrderSide.SELL,
+            quantity=quantity,
+            time_in_force=TimeInForce.GTC,
+        )
+        self.submit_order(order)
+
+        # TP/SL 추적 저장
+        self.position_stop_loss = stop_loss
+        self.position_take_profit = take_profit
+        self.position_is_long = False
 
     def _manage_position(self, current_price: float):
         """
@@ -624,11 +693,33 @@ class ICTStrategy(Strategy):
         current_price : float
             현재 가격
         """
-        # 실제 구현 시 포지션 관리 로직 추가
-        # - Trailing Stop
-        # - Partial Exit
-        # - Break Even 이동
-        pass
+        if self.position_stop_loss is None or self.position_take_profit is None:
+            return
+
+        should_close = False
+        reason = ""
+
+        if self.position_is_long:
+            if current_price <= self.position_stop_loss:
+                should_close = True
+                reason = f"Stop Loss hit at {current_price:.2f} (SL: {self.position_stop_loss:.2f})"
+            elif current_price >= self.position_take_profit:
+                should_close = True
+                reason = f"Take Profit hit at {current_price:.2f} (TP: {self.position_take_profit:.2f})"
+        else:
+            if current_price >= self.position_stop_loss:
+                should_close = True
+                reason = f"Stop Loss hit at {current_price:.2f} (SL: {self.position_stop_loss:.2f})"
+            elif current_price <= self.position_take_profit:
+                should_close = True
+                reason = f"Take Profit hit at {current_price:.2f} (TP: {self.position_take_profit:.2f})"
+
+        if should_close:
+            self.log.info(f"Closing position: {reason}")
+            self.close_all_positions(self.instrument_id)
+            self.position_stop_loss = None
+            self.position_take_profit = None
+            self.position_is_long = None
 
     def on_event(self, event: Event):
         """이벤트 처리"""

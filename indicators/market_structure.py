@@ -150,12 +150,12 @@ class MarketStructureAnalyzer:
         lookback: Optional[int] = None
     ) -> MarketTrend:
         """
-        현재 시장 추세 판단
+        현재 시장 추세 판단 (점수 기반)
 
         로직:
-        - Higher Highs + Higher Lows = Bullish
-        - Lower Highs + Lower Lows = Bearish
-        - 그 외 = Ranging
+        - 스윙포인트 비교에서 과반수(≥50%) HH+HL → BULLISH
+        - 과반수(≥50%) LH+LL → BEARISH
+        - 그 외 → RANGING
 
         Parameters
         ----------
@@ -175,7 +175,7 @@ class MarketStructureAnalyzer:
         if lookback is None:
             lookback = self.structure_lookback
 
-        if len(swing_points) < 4:
+        if len(swing_points) < 2:
             return MarketTrend.RANGING
 
         # 최근 swing points만 분석
@@ -185,37 +185,125 @@ class MarketStructureAnalyzer:
         highs = [sp for sp in recent_swings if sp.is_high]
         lows = [sp for sp in recent_swings if not sp.is_high]
 
-        if len(highs) < 2 or len(lows) < 2:
+        score, comparisons = 0, 0
+
+        # 고점 비교: Higher High → +1, Lower High → -1
+        for i in range(1, len(highs)):
+            comparisons += 1
+            if highs[i].price > highs[i - 1].price:
+                score += 1
+            elif highs[i].price < highs[i - 1].price:
+                score -= 1
+
+        # 저점 비교: Higher Low → +1, Lower Low → -1
+        for i in range(1, len(lows)):
+            comparisons += 1
+            if lows[i].price > lows[i - 1].price:
+                score += 1
+            elif lows[i].price < lows[i - 1].price:
+                score -= 1
+
+        if comparisons == 0:
             return MarketTrend.RANGING
 
-        # Higher Highs 확인
-        higher_highs = all(
-            highs[i].price > highs[i - 1].price
-            for i in range(1, len(highs))
-        )
-
-        # Higher Lows 확인
-        higher_lows = all(
-            lows[i].price > lows[i - 1].price
-            for i in range(1, len(lows))
-        )
-
-        # Lower Highs 확인
-        lower_highs = all(
-            highs[i].price < highs[i - 1].price
-            for i in range(1, len(highs))
-        )
-
-        # Lower Lows 확인
-        lower_lows = all(
-            lows[i].price < lows[i - 1].price
-            for i in range(1, len(lows))
-        )
-
-        # 추세 판단
-        if higher_highs and higher_lows:
+        # ratio: -1.0(강한 하락) ~ +1.0(강한 상승)
+        ratio = score / comparisons
+        if ratio >= 0.5:
             return MarketTrend.BULLISH
-        elif lower_highs and lower_lows:
+        elif ratio <= -0.5:
+            return MarketTrend.BEARISH
+        else:
+            return MarketTrend.RANGING
+
+    def calculate_trend_score(
+        self,
+        swing_points: Optional[List[SwingPoint]] = None,
+        lookback: Optional[int] = None
+    ) -> float:
+        """
+        추세 강도를 0~100 점수로 반환
+
+        50 = 중립(횡보), 100 = 강한 상승, 0 = 강한 하락
+
+        Parameters
+        ----------
+        swing_points : Optional[List[SwingPoint]]
+            스윙 포인트 리스트
+        lookback : Optional[int]
+            분석할 스윙 포인트 개수
+
+        Returns
+        -------
+        float
+            추세 강도 점수 (0~100)
+        """
+        if swing_points is None:
+            swing_points = self.swing_points
+        if lookback is None:
+            lookback = self.structure_lookback
+
+        if len(swing_points) < 2:
+            return 50.0
+
+        recent_swings = swing_points[-lookback:] if len(swing_points) > lookback else swing_points
+        highs = [sp for sp in recent_swings if sp.is_high]
+        lows = [sp for sp in recent_swings if not sp.is_high]
+
+        score, comparisons = 0, 0
+        for i in range(1, len(highs)):
+            comparisons += 1
+            if highs[i].price > highs[i - 1].price:
+                score += 1
+            elif highs[i].price < highs[i - 1].price:
+                score -= 1
+        for i in range(1, len(lows)):
+            comparisons += 1
+            if lows[i].price > lows[i - 1].price:
+                score += 1
+            elif lows[i].price < lows[i - 1].price:
+                score -= 1
+
+        if comparisons == 0:
+            return 50.0
+
+        ratio = score / comparisons  # -1.0 ~ +1.0
+        return (ratio + 1.0) / 2.0 * 100.0
+
+    def get_trend_from_price_slope(
+        self,
+        closes: np.ndarray,
+        period: int = 10
+    ) -> MarketTrend:
+        """
+        스윙포인트 없을 때 단기 가격 기울기로 임시 추세 판단 (fallback)
+
+        선형회귀 기울기를 기반으로 가격 방향성을 추론합니다.
+
+        Parameters
+        ----------
+        closes : np.ndarray
+            종가 배열
+        period : int
+            분석 기간
+
+        Returns
+        -------
+        MarketTrend
+            기울기 기반 임시 추세
+        """
+        if len(closes) < period:
+            return MarketTrend.RANGING
+
+        recent = closes[-period:]
+        x = np.arange(period)
+        slope = np.polyfit(x, recent, 1)[0]
+
+        slope_pct = (slope / np.mean(recent)) * 100
+        threshold = 0.05  # 캔들당 0.05% 이상 움직임
+
+        if slope_pct > threshold:
+            return MarketTrend.BULLISH
+        elif slope_pct < -threshold:
             return MarketTrend.BEARISH
         else:
             return MarketTrend.RANGING
