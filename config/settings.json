@@ -1,0 +1,76 @@
+{
+  "exchange": {
+    "name": "binance",
+    "testnet": false,
+    "rate_limit": true
+  },
+
+  "market": {
+    "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    "default_symbol": "BTC/USDT",
+    "timeframes": {
+      "htf": "4h",
+      "mtf": "1h",
+      "ltf": "15m",
+      "entry": "5m"
+    }
+  },
+
+  "order_block": {
+    "enabled": true,
+    "min_displacement_pct": 0.3,
+    "min_body_ratio": 0.4,
+    "max_lookback": 50,
+    "mitigation_threshold": 0.5,
+    "valid_candles_min": 3,
+    "breaker_block": true
+  },
+
+  "fvg": {
+    "enabled": true,
+    "min_gap_pct": 0.05,
+    "max_lookback": 100,
+    "partial_fill_pct": 0.5,
+    "inverse_fvg": true,
+    "confluence_ob": true
+  },
+
+  "liquidity": {
+    "enabled": true,
+    "swing_lookback": 10,
+    "equal_level_tolerance_pct": 0.02,
+    "sweep_confirmation_pct": 0.1,
+    "bsl_ssl_lookback": 50,
+    "inducement_detection": true
+  },
+
+  "market_structure": {
+    "enabled": true,
+    "swing_strength": 5,
+    "bos_confirmation": true,
+    "choch_detection": true,
+    "trend_lookback": 20
+  },
+
+  "strategy": {
+    "confluence_min_score": 3,
+    "risk_reward_min": 2.0,
+    "session_filter": {
+      "enabled": true,
+      "sessions": ["london", "new_york"],
+      "london_open_utc": "08:00",
+      "london_close_utc": "16:30",
+      "ny_open_utc": "13:30",
+      "ny_close_utc": "20:00"
+    },
+    "htf_bias_required": true
+  },
+
+  "display": {
+    "show_invalidated": false,
+    "max_levels_display": 5,
+    "color_bullish": "green",
+    "color_bearish": "red",
+    "color_neutral": "yellow"
+  }
+}
